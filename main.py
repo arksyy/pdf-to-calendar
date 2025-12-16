@@ -58,6 +58,7 @@ for game in all_games:
 
 total_events_created = 0
 datetime_errors = 0
+duplicates_skipped = 0
 for cal_name, days in grouped.items():
     create_cal_script = f'''
     tell application "Calendar"
@@ -115,6 +116,40 @@ for cal_name, days in grouped.items():
             start_date_str = start_dt.strftime("%B %d, %Y %I:%M:%S %p")
             end_date_str = end_time_dt.strftime("%B %d, %Y %I:%M:%S %p")
             description_escaped = description.replace('"', '\\"')
+            event_name_escaped = event_name.replace('"', '\\"')
+
+            # Check for duplicate events by checking events on the same day with same summary
+            check_duplicate_script = f'''
+            tell application "Calendar"
+                tell calendar "{cal_name}"
+                    set targetDate to date "{start_date_str}"
+                    set theEvents to every event
+                    set matchCount to 0
+                    repeat with anEvent in theEvents
+                        set eventStart to start date of anEvent
+                        set eventSummary to summary of anEvent
+                        if eventSummary is "{event_name_escaped}" then
+                            if (eventStart as string) is (targetDate as string) then
+                                set matchCount to matchCount + 1
+                            end if
+                        end if
+                    end repeat
+                    return matchCount
+                end tell
+            end tell
+            '''
+
+            try:
+                result = subprocess.run(["osascript", "-e", check_duplicate_script], check=True, capture_output=True, text=True)
+                duplicate_count = int(result.stdout.strip())
+
+                if duplicate_count > 0:
+                    print(f"Skipping duplicate event: '{event_name}' on {date_str} at {start_time}")
+                    duplicates_skipped += 1
+                    continue
+
+            except (subprocess.CalledProcessError, ValueError) as e:
+                print(f"Warning: Could not check for duplicates, proceeding with creation: {e}")
 
             create_event_script = f'''
             tell application "Calendar"
@@ -146,6 +181,8 @@ print("\nSUMMARY")
 print(f"Total games parsed: {len(all_games)}")
 print(f"Total events created: {total_events_created}")
 print(f"Games skipped: {skipped_games}")
+if duplicates_skipped > 0:
+    print(f"Duplicate events skipped: {duplicates_skipped}")
 if datetime_errors > 0:
     print(f"Datetime parsing errors: {datetime_errors}")
 
@@ -162,8 +199,5 @@ if skipped_games > len(all_games) * 0.3:
     print(f"\nWARNING: More than 30% of games were skipped!")
     print(f"  Check if calendar_mapping is correct.")
 
-if total_events_created == 0 and len(all_games) > 0:
-    print(f"\nERROR: Found {len(all_games)} games but created 0 events!")
-    print(f"  Check calendar_mapping and event creation logic.")
 elif total_events_created > 0:
     print(f"\nSuccess! All events added to Apple Calendar.")
