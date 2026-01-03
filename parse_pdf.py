@@ -10,26 +10,23 @@ def normalize_text(text):
     ).lower()
 
 
-def determine_location(surface_str, calibre_str):
-    """Determine location from surface name or calibre text."""
+def determine_location(surface_str):
+    """Determine location from first letter of surface name."""
     if "(" in surface_str:
         return surface_str
 
-    surface_normalized = normalize_text(surface_str)
+    if not surface_str:
+        return surface_str
+
+    first_letter = surface_str[0].upper()
     location = None
 
-    st_aug_names = ["giguer", "salvatore", "k2d"]
-    chauveau_names = ["oeufrier", "videotron", "thai"]
-
-    if any(name in surface_normalized for name in st_aug_names):
+    # St-Aug: G, S, K
+    if first_letter in ['G', 'S', 'K']:
         location = "St-Aug"
-    elif any(name in surface_normalized for name in chauveau_names):
+    # Chauveau: O, V, T
+    elif first_letter in ['O', 'V', 'T']:
         location = "Chauveau"
-    elif calibre_str:
-        if "Chauveau" in calibre_str:
-            location = "Chauveau"
-        elif "Aug" in calibre_str:
-            location = "St-Aug"
 
     if location:
         return f"{surface_str} ({location})"
@@ -54,8 +51,11 @@ def parse_row(row):
         time_str = ":".join(time_str.split(":")[:2])
 
     surface_str = row[3].strip() if row[3] else ""
+    # Extract only the first word from surface to avoid overlapping text
+    if surface_str:
+        surface_str = surface_str.split()[0]
     calibre_str = row[4].strip() if row[4] else ""
-    surface_str = determine_location(surface_str, calibre_str)
+    surface_str = determine_location(surface_str)
 
     game = {
         "day": row[0].strip() if row[0] else "",
