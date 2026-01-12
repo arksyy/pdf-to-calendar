@@ -35,11 +35,12 @@ def determine_location(surface_str):
 
 def parse_row(row):
     """Parse a single table row into a game dict."""
-    if not any(row) or len(row) < 8:
+    if not any(row) or len(row) < 6:
         return None
 
     first_col = row[0].strip() if row[0] else ""
-    if not first_col or first_col.lower() in ["jour", "day", "date"]:
+    # Only skip actual header rows, not rows with empty first column
+    if first_col and first_col.lower() in ["jour", "day", "date"]:
         return None
 
     date_str = row[1].strip() if row[1] else ""
@@ -57,16 +58,31 @@ def parse_row(row):
     calibre_str = row[4].strip() if row[4] else ""
     surface_str = determine_location(surface_str)
 
-    game = {
-        "day": row[0].strip() if row[0] else "",
-        "date": date_str,
-        "time": time_str,
-        "surface": surface_str,
-        "calibre": calibre_str,
-        "visitor": row[5].strip() if row[5] else "",
-        "local": row[6].strip() if row[6] else "",
-        "referee": row[7].strip() if row[7] else "",
-    }
+    # Handle both 6-column and 8-column formats
+    if len(row) >= 8:
+        # Old format: [Day, Date, Time, Surface, Calibre, Visitor, Local, Referee]
+        game = {
+            "day": row[0].strip() if row[0] else "",
+            "date": date_str,
+            "time": time_str,
+            "surface": surface_str,
+            "calibre": calibre_str,
+            "visitor": row[5].strip() if row[5] else "",
+            "local": row[6].strip() if row[6] else "",
+            "referee": row[7].strip() if row[7] else "",
+        }
+    else:
+        # New format: [Day, Date, Time, Surface, Calibre, Referee]
+        game = {
+            "day": row[0].strip() if row[0] else "",
+            "date": date_str,
+            "time": time_str,
+            "surface": surface_str,
+            "calibre": calibre_str,
+            "visitor": "",
+            "local": "",
+            "referee": row[5].strip() if row[5] else "",
+        }
 
     if game["date"] and game["time"]:
         return game
