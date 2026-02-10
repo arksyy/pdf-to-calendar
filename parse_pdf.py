@@ -35,7 +35,7 @@ def determine_location(surface_str):
 
 def parse_row(row):
     """Parse a single table row into a game dict."""
-    if not any(row) or len(row) < 6:
+    if not any(row) or len(row) < 5:
         return None
 
     first_col = row[0].strip() if row[0] else ""
@@ -52,13 +52,10 @@ def parse_row(row):
         time_str = ":".join(time_str.split(":")[:2])
 
     surface_str = row[3].strip() if row[3] else ""
-    # Extract only the first word from surface to avoid overlapping text
-    if surface_str:
-        surface_str = surface_str.split()[0]
     calibre_str = row[4].strip() if row[4] else ""
     surface_str = determine_location(surface_str)
 
-    # Handle both 6-column and 8-column formats
+    # Handle 5, 6, and 8-column formats
     if len(row) >= 8:
         # Old format: [Day, Date, Time, Surface, Calibre, Visitor, Local, Referee]
         game = {
@@ -71,8 +68,8 @@ def parse_row(row):
             "local": row[6].strip() if row[6] else "",
             "referee": row[7].strip() if row[7] else "",
         }
-    else:
-        # New format: [Day, Date, Time, Surface, Calibre, Referee]
+    elif len(row) >= 6:
+        # Format: [Day, Date, Time, Surface, Calibre, Referee]
         game = {
             "day": row[0].strip() if row[0] else "",
             "date": date_str,
@@ -82,6 +79,18 @@ def parse_row(row):
             "visitor": "",
             "local": "",
             "referee": row[5].strip() if row[5] else "",
+        }
+    else:
+        # Minimal format: [Day, Date, Time, Surface, Calibre]
+        game = {
+            "day": row[0].strip() if row[0] else "",
+            "date": date_str,
+            "time": time_str,
+            "surface": surface_str,
+            "calibre": calibre_str,
+            "visitor": "",
+            "local": "",
+            "referee": "",
         }
 
     if game["date"] and game["time"]:
