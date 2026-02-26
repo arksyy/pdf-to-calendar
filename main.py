@@ -29,6 +29,21 @@ if not all_games:
     exit()
 print(f"Parsed {len(all_games)} games from PDFs.")
 
+def split_into_blocks(games_list, gap_minutes=90):
+    """Group consecutive games into blocks; a new block starts when gap exceeds gap_minutes."""
+    blocks = []
+    current_block = [games_list[0]]
+    for i in range(1, len(games_list)):
+        prev_dt = datetime.strptime(games_list[i - 1]["start"], "%H:%M")
+        curr_dt = datetime.strptime(games_list[i]["start"], "%H:%M")
+        if (curr_dt - prev_dt).total_seconds() / 60 > gap_minutes:
+            blocks.append(current_block)
+            current_block = []
+        current_block.append(games_list[i])
+    blocks.append(current_block)
+    return blocks
+
+
 print("Creating events in Apple Calendar...")
 grouped = defaultdict(lambda: defaultdict(list))
 unmapped_locations = set()
@@ -84,87 +99,95 @@ for cal_name, days in grouped.items():
     for date_str, games_list in days.items():
         try:
             games_list.sort(key=lambda x: x["start"])
-            start_time = games_list[0]["start"]
+            blocks = split_into_blocks(games_list)
+        except Exception as e:
+            print(f"ERROR: Failed to process games for {cal_name} on {date_str}: {e}")
+            continue
 
+        for block in blocks:
             try:
-                start_dt = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
-            except ValueError as e:
-                print(f"Skipping event - invalid start datetime '{date_str} {start_time}': {e}")
-                datetime_errors += 1
-                continue
+                start_time = block[0]["start"]
 
-            try:
-                end_time_dt = datetime.strptime(
-                    f"{date_str} {games_list[-1]['start']}", "%Y-%m-%d %H:%M"
-                ) + timedelta(minutes=50)
-            except ValueError as e:
-                print(f"Skipping event - invalid end datetime: {e}")
-                datetime_errors += 1
-                continue
-
-            surface_counts = {}
-            for g in games_list:
-                surface_full = g["surface"]
-                surface_name = re.sub(r"\s*\(.*?\)", "", surface_full).strip()
-                surface_counts[surface_name] = surface_counts.get(surface_name, 0) + 1
-
-            surface_details = [f"{surf}: {count} game{'s' if count > 1 else ''}"
-                             for surf, count in sorted(surface_counts.items())]
-            description = ", ".join(surface_details)
-            event_name = f"{len(games_list)} games"
-
-            start_date_str = start_dt.strftime("%B %d, %Y %I:%M:%S %p")
-            end_date_str = end_time_dt.strftime("%B %d, %Y %I:%M:%S %p")
-            description_escaped = description.replace('"', '\\"')
-            event_name_escaped = event_name.replace('"', '\\"')
-
-            # Check for duplicate events by checking events on the same day with same summary
-            check_duplicate_script = f'''
-            tell application "Calendar"
-                tell calendar "{cal_name}"
-                    set targetDate to date "{start_date_str}"
-                    set theEvents to every event
-                    set matchCount to 0
-                    repeat with anEvent in theEvents
-                        set eventStart to start date of anEvent
-                        set eventSummary to summary of anEvent
-                        if eventSummary is "{event_name_escaped}" then
-                            if (eventStart as string) is (targetDate as string) then
-                                set matchCount to matchCount + 1
-                            end if
-                        end if
-                    end repeat
-                    return matchCount
-                end tell
-            end tell
-            '''
-
-            try:
-                result = subprocess.run(["osascript", "-e", check_duplicate_script], check=True, capture_output=True, text=True)
-                duplicate_count = int(result.stdout.strip())
-
-                if duplicate_count > 0:
-                    print(f"Skipping duplicate event: '{event_name}' on {date_str} at {start_time}")
-                    duplicates_skipped += 1
+                try:
+                    start_dt = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
+                except ValueError as e:
+                    print(f"Skipping event - invalid start datetime '{date_str} {start_time}': {e}")
+                    datetime_errors += 1
                     continue
 
-            except (subprocess.CalledProcessError, ValueError) as e:
-                print(f"Warning: Could not check for duplicates, proceeding with creation: {e}")
+                try:
+                    end_time_dt = datetime.strptime(
+                        f"{date_str} {block[-1]['start']}", "%Y-%m-%d %H:%M"
+                    ) + timedelta(minutes=50)
+                except ValueError as e:
+                    print(f"Skipping event - invalid end datetime: {e}")
+                    datetime_errors += 1
+                    continue
 
-            create_event_script = f'''
-            tell application "Calendar"
-                tell calendar "{cal_name}"
-                    make new event with properties {{summary:"{event_name}", start date:date "{start_date_str}", end date:date "{end_date_str}", description:"{description_escaped}"}}
+                surface_counts = {}
+                for g in block:
+                    surface_full = g["surface"]
+                    surface_name = re.sub(r"\s*\(.*?\)", "", surface_full).strip()
+                    surface_counts[surface_name] = surface_counts.get(surface_name, 0) + 1
+
+                surface_details = [f"{surf}: {count} game{'s' if count > 1 else ''}"
+                                 for surf, count in sorted(surface_counts.items())]
+                description = ", ".join(surface_details)
+                n = len(block)
+                event_name = f"{n} game{'s' if n > 1 else ''}"
+
+                start_date_str = start_dt.strftime("%B %d, %Y %H:%M:%S")
+                end_date_str = end_time_dt.strftime("%B %d, %Y %H:%M:%S")
+                description_escaped = description.replace('"', '\\"')
+                event_name_escaped = event_name.replace('"', '\\"')
+
+                # Check for duplicate events by checking events on the same day with same summary
+                check_duplicate_script = f'''
+                tell application "Calendar"
+                    tell calendar "{cal_name}"
+                        set targetDate to date "{start_date_str}"
+                        set theEvents to every event
+                        set matchCount to 0
+                        repeat with anEvent in theEvents
+                            set eventStart to start date of anEvent
+                            set eventSummary to summary of anEvent
+                            if eventSummary is "{event_name_escaped}" then
+                                if (eventStart as string) is (targetDate as string) then
+                                    set matchCount to matchCount + 1
+                                end if
+                            end if
+                        end repeat
+                        return matchCount
+                    end tell
                 end tell
-            end tell
-            '''
+                '''
 
-            subprocess.run(["osascript", "-e", create_event_script], check=True, capture_output=True, text=True)
-            events_created += 1
+                try:
+                    result = subprocess.run(["osascript", "-e", check_duplicate_script], check=True, capture_output=True, text=True)
+                    duplicate_count = int(result.stdout.strip())
 
-        except Exception as e:
-            print(f"ERROR: Failed to create event for {cal_name} on {date_str}: {e}")
-            continue
+                    if duplicate_count > 0:
+                        print(f"Skipping duplicate event: '{event_name}' on {date_str} at {start_time}")
+                        duplicates_skipped += 1
+                        continue
+
+                except (subprocess.CalledProcessError, ValueError) as e:
+                    print(f"Warning: Could not check for duplicates, proceeding with creation: {e}")
+
+                create_event_script = f'''
+                tell application "Calendar"
+                    tell calendar "{cal_name}"
+                        make new event with properties {{summary:"{event_name}", start date:date "{start_date_str}", end date:date "{end_date_str}", description:"{description_escaped}"}}
+                    end tell
+                end tell
+                '''
+
+                subprocess.run(["osascript", "-e", create_event_script], check=True, capture_output=True, text=True)
+                events_created += 1
+
+            except Exception as e:
+                print(f"ERROR: Failed to create event for {cal_name} on {date_str}: {e}")
+                continue
 
     print(f"Created {events_created} event(s) in calendar '{cal_name}'")
     total_events_created += events_created
