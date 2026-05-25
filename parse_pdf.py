@@ -1,6 +1,8 @@
 import unicodedata
 import pdfplumber
 
+HEADER_LABELS = ("Jour", "Date", "Heure", "Surface", "Calibre", "Arbitre")
+
 
 def normalize_text(text):
     """Remove accents and convert to lowercase for matching."""
@@ -98,23 +100,89 @@ def parse_row(row):
     return None
 
 
+def _cluster_words_into_lines(words, tol=3):
+    """Group words sharing (approximately) the same vertical position into lines."""
+    lines = []
+    for w in sorted(words, key=lambda w: w["top"]):
+        for line in lines:
+            if abs(line["top"] - w["top"]) <= tol:
+                line["words"].append(w)
+                break
+        else:
+            lines.append({"top": w["top"], "words": [w]})
+    return lines
+
+
+def reconstruct_rows_from_words(page):
+    """Rebuild table rows from word x-positions for borderless PDFs.
+
+    pdfplumber detects tables from ruling lines, so a schedule whose table has
+    no borders yields zero tables. Here we anchor each column to the x position
+    of its header label, then bucket every word on a line into its column. The
+    result mimics the shape extract_tables() produces, so parse_row handles it
+    unchanged.
+    """
+    words = page.extract_words()
+    if not words:
+        return []
+
+    lines = _cluster_words_into_lines(words)
+
+    # Locate the header line and the left x of each column.
+    col_x = None
+    header_top = None
+    for line in lines:
+        texts = {w["text"] for w in line["words"]}
+        if sum(label in texts for label in HEADER_LABELS) >= 4:
+            header_top = line["top"]
+            col_x = [
+                next((w["x0"] for w in line["words"] if w["text"] == label), None)
+                for label in HEADER_LABELS
+            ]
+            break
+
+    if not col_x or any(x is None for x in col_x):
+        return []
+
+    margin = 8
+    bounds = [x - margin for x in col_x]
+
+    rows = []
+    for line in lines:
+        if line["top"] <= header_top:
+            continue
+        cols = ["" for _ in HEADER_LABELS]
+        for w in sorted(line["words"], key=lambda w: w["x0"]):
+            ci = 0
+            for i in range(len(col_x)):
+                if w["x0"] >= bounds[i]:
+                    ci = i
+            cols[ci] = (cols[ci] + " " + w["text"]).strip()
+        if any(cols):
+            rows.append(cols)
+    return rows
+
+
 def parse_games(pdf_path):
     games = []
     skipped_rows = 0
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    try:
-                        game = parse_row(row)
-                        if game:
-                            games.append(game)
-                        else:
-                            skipped_rows += 1
-                    except (IndexError, AttributeError):
+            rows = [row for table in page.extract_tables() for row in table]
+            if not rows:
+                # Borderless PDFs expose no ruling lines, so pdfplumber finds no
+                # tables. Fall back to rebuilding rows from word positions.
+                rows = reconstruct_rows_from_words(page)
+            for row in rows:
+                try:
+                    game = parse_row(row)
+                    if game:
+                        games.append(game)
+                    else:
                         skipped_rows += 1
+                except (IndexError, AttributeError):
+                    skipped_rows += 1
 
     print(f"Found {len(games)} games in the PDF")
     if skipped_rows > 0:
