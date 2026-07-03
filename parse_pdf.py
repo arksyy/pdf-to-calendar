@@ -1,7 +1,9 @@
+import re
 import unicodedata
 import pdfplumber
 
-HEADER_LABELS = ("Jour", "Date", "Heure", "Surface", "Calibre", "Arbitre")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+TIME_RE = re.compile(r"\d{1,2}:\d{2}")
 
 
 def normalize_text(text):
@@ -100,67 +102,121 @@ def parse_row(row):
     return None
 
 
-def _cluster_words_into_lines(words, tol=3):
-    """Group words sharing (approximately) the same vertical position into lines."""
+def _cluster_chars_into_lines(chars, tol=3):
+    """Group chars sharing (approximately) the same vertical position into lines.
+
+    Iterating page.chars in order preserves PDF content-stream order within each
+    line, which is what lets us recover overlapping columns (see _split_runs).
+    """
     lines = []
-    for w in sorted(words, key=lambda w: w["top"]):
+    for c in chars:
         for line in lines:
-            if abs(line["top"] - w["top"]) <= tol:
-                line["words"].append(w)
+            if abs(line["top"] - c["top"]) <= tol:
+                line["chars"].append(c)
                 break
         else:
-            lines.append({"top": w["top"], "words": [w]})
+            lines.append({"top": c["top"], "chars": [c]})
+    lines.sort(key=lambda line: line["top"])
     return lines
 
 
+def _split_runs(chars):
+    """Split a line's chars (in stream order) into runs at backward x jumps.
+
+    In this borderless schedule the left columns (Jour/Date/Heure/Surface) and
+    the right columns (Calibre/Visiteur/Local/Arbitre) are emitted as two
+    separate text runs that overlap horizontally. extract_words() sorts by x and
+    interleaves them into garbage (e.g. "(St-AuFg5"). Because each run is emitted
+    left-to-right contiguously in the content stream, a char whose x jumps back
+    relative to the previous char marks the start of a new run, letting us keep
+    each run's text intact.
+    """
+    runs = []
+    cur = []
+    prev_x = None
+    for c in chars:
+        if prev_x is not None and c["x0"] < prev_x - 3:
+            runs.append(cur)
+            cur = []
+        cur.append(c)
+        prev_x = c["x0"]
+    if cur:
+        runs.append(cur)
+    return ["".join(c["text"] for c in run).strip() for run in runs]
+
+
 def reconstruct_rows_from_words(page):
-    """Rebuild table rows from word x-positions for borderless PDFs.
+    """Rebuild table rows for borderless PDFs from char positions.
 
     pdfplumber detects tables from ruling lines, so a schedule whose table has
-    no borders yields zero tables. Here we anchor each column to the x position
-    of its header label, then bucket every word on a line into its column. The
+    no borders yields zero tables. We rebuild each row by clustering chars into
+    lines, splitting overlapping column runs apart, then pulling the date, time,
+    and surface out of the left run and the calibre out of the right run. The
     result mimics the shape extract_tables() produces, so parse_row handles it
     unchanged.
     """
-    words = page.extract_words()
-    if not words:
+    if not page.chars:
         return []
-
-    lines = _cluster_words_into_lines(words)
-
-    # Locate the header line and the left x of each column.
-    col_x = None
-    header_top = None
-    for line in lines:
-        texts = {w["text"] for w in line["words"]}
-        if sum(label in texts for label in HEADER_LABELS) >= 4:
-            header_top = line["top"]
-            col_x = [
-                next((w["x0"] for w in line["words"] if w["text"] == label), None)
-                for label in HEADER_LABELS
-            ]
-            break
-
-    if not col_x or any(x is None for x in col_x):
-        return []
-
-    margin = 8
-    bounds = [x - margin for x in col_x]
 
     rows = []
-    for line in lines:
-        if line["top"] <= header_top:
+    for line in _cluster_chars_into_lines(page.chars):
+        runs = _split_runs(line["chars"])
+        if not runs:
             continue
-        cols = ["" for _ in HEADER_LABELS]
-        for w in sorted(line["words"], key=lambda w: w["x0"]):
-            ci = 0
-            for i in range(len(col_x)):
-                if w["x0"] >= bounds[i]:
-                    ci = i
-            cols[ci] = (cols[ci] + " " + w["text"]).strip()
-        if any(cols):
-            rows.append(cols)
+
+        left = runs[0]
+        date_match = DATE_RE.search(left)
+        if not date_match:
+            # Header rows and the wrapped second line of a time cell have no date.
+            continue
+
+        date = date_match.group(0)
+        day = left[: date_match.start()].strip()
+        after_date = left[date_match.end():]
+
+        time_match = TIME_RE.search(after_date)
+        if time_match:
+            time = time_match.group(0)
+            surface = after_date[time_match.end():].strip()
+        else:
+            time = ""
+            surface = after_date.strip()
+
+        calibre = ""
+        if len(runs) > 1:
+            calibre_parts = runs[1].split()
+            if calibre_parts:
+                calibre = calibre_parts[0]
+
+        rows.append([day, date, time, surface, calibre])
     return rows
+
+
+def _rows_to_games(rows):
+    """Parse rows into games, returning (games, skipped_row_count)."""
+    games = []
+    skipped = 0
+    for row in rows:
+        try:
+            game = parse_row(row)
+            if game:
+                games.append(game)
+            else:
+                skipped += 1
+        except (IndexError, AttributeError):
+            skipped += 1
+    return games, skipped
+
+
+def _located_count(games):
+    """Count games whose surface carries an intact "(...)" location tag.
+
+    pdfplumber's table/word extraction sorts chars by x, which interleaves
+    overlapping column text and breaks the location parenthetical. A higher
+    count means the extraction kept rows intact, so we use it to pick the better
+    of the two extraction strategies per page.
+    """
+    return sum(1 for g in games if "(" in g["surface"] and ")" in g["surface"])
 
 
 def parse_games(pdf_path):
@@ -169,20 +225,28 @@ def parse_games(pdf_path):
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            rows = [row for table in page.extract_tables() for row in table]
-            if not rows:
-                # Borderless PDFs expose no ruling lines, so pdfplumber finds no
-                # tables. Fall back to rebuilding rows from word positions.
-                rows = reconstruct_rows_from_words(page)
-            for row in rows:
-                try:
-                    game = parse_row(row)
-                    if game:
-                        games.append(game)
-                    else:
-                        skipped_rows += 1
-                except (IndexError, AttributeError):
-                    skipped_rows += 1
+            # Two strategies. extract_tables() relies on ruling lines; char
+            # reconstruction rebuilds rows from content-stream order and survives
+            # overlapping columns that interleave under x-sorted extraction. Keep
+            # whichever recovers more rows with their location tag intact.
+            table_rows = [row for table in page.extract_tables() for row in table]
+            char_rows = reconstruct_rows_from_words(page)
+
+            table_games, table_skipped = _rows_to_games(table_rows)
+            char_games, char_skipped = _rows_to_games(char_rows)
+
+            # Prefer table extraction on ties: when a real table exists its
+            # columns are already clean, while char reconstruction crams
+            # calibre and referee into the surface cell.
+            table_score = (_located_count(table_games), len(table_games))
+            char_score = (_located_count(char_games), len(char_games))
+            if table_score >= char_score:
+                page_games, page_skipped = table_games, table_skipped
+            else:
+                page_games, page_skipped = char_games, char_skipped
+
+            games.extend(page_games)
+            skipped_rows += page_skipped
 
     print(f"Found {len(games)} games in the PDF")
     if skipped_rows > 0:
